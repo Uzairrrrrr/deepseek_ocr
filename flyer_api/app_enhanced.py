@@ -64,6 +64,8 @@ try:
         ocr_processor = None
     else:
         logger.info("Initializing TWO-STAGE processing (detection + OCR)")
+        logger.info("Stage 1: Using DeepSeek-OCR to detect offers")
+        logger.info("Stage 2: Using DeepSeek-OCR to extract text from crops")
         unified_processor = None
         detector = OfferDetector(use_llm=True)
         ocr_processor = OCRProcessor()
@@ -87,6 +89,7 @@ class ExtractedText(BaseModel):
     discounted_price: Optional[str] = None
     discount_percentage: Optional[str] = None
     promotional_text: Optional[str] = None
+    ocr_confidence: Optional[float] = None  # OCR confidence score
 
 
 class OfferResult(BaseModel):
@@ -95,7 +98,9 @@ class OfferResult(BaseModel):
     image_url: str
     position: OfferPosition
     extracted_text: ExtractedText
-    confidence: float
+    confidence: float  # Detection confidence
+    has_text: Optional[bool] = None  # Whether text is present
+    has_image: Optional[bool] = None  # Whether product image is present
 
 
 class APIResponse(BaseModel):
@@ -257,9 +262,12 @@ async def process_unified(image: np.ndarray, flyer_id: str) -> List[OfferResult]
                 original_price=extracted_text.get('original_price'),
                 discounted_price=extracted_text.get('discounted_price'),
                 discount_percentage=extracted_text.get('discount_percentage'),
-                promotional_text=extracted_text.get('promotional_text')
+                promotional_text=extracted_text.get('promotional_text'),
+                ocr_confidence=extracted_text.get('confidence', 0.0)
             ),
-            confidence=confidence
+            confidence=confidence,
+            has_text=detection.get('has_text', None),
+            has_image=detection.get('has_image', None)
         )
         
         offers.append(offer)
@@ -291,18 +299,21 @@ async def process_two_stage(image: np.ndarray, flyer_id: str) -> List[OfferResul
         x, y, w, h = detection['bbox']
         confidence = detection['confidence']
         
-        # Crop the offer region
-        crop = image[y:y+h, x:x+w]
+        # Crop the offer region with safety checks
+        img_h, img_w = image.shape[:2]
+        y_end = min(y + h, img_h)
+        x_end = min(x + w, img_w)
+        crop = image[y:y_end, x:x_end]
         
-        # Save cropped image
+        # Save cropped image with high quality
         crop_filename = f"{offer_id}.jpg"
         crop_path = OUTPUT_DIR / crop_filename
-        cv2.imwrite(str(crop_path), crop)
+        cv2.imwrite(str(crop_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
         
         logger.info(f"Stage 2: OCR for offer {idx+1}/{len(detections)}: {offer_id}")
         
-        # Perform OCR
-        ocr_result = ocr_processor.extract_text(crop)
+        # Perform OCR on cropped image
+        ocr_result = ocr_processor.extract_text(crop) if ocr_processor else {'full_text': '', 'confidence': 0.0}
         
         # Create offer result
         offer = OfferResult(
@@ -316,9 +327,12 @@ async def process_two_stage(image: np.ndarray, flyer_id: str) -> List[OfferResul
                 original_price=ocr_result.get('original_price'),
                 discounted_price=ocr_result.get('discounted_price'),
                 discount_percentage=ocr_result.get('discount_percentage'),
-                promotional_text=ocr_result.get('promotional_text')
+                promotional_text=ocr_result.get('promotional_text'),
+                ocr_confidence=ocr_result.get('confidence', 0.0)
             ),
-            confidence=confidence
+            confidence=confidence,
+            has_text=detection.get('has_text', None),
+            has_image=detection.get('has_image', None)
         )
         
         offers.append(offer)

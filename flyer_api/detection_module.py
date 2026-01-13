@@ -22,7 +22,7 @@ class OfferDetector:
     Detects offer containers in flyer images using DeepSeek-OCR VLM
     """
     
-    def __init__(self, use_llm: bool = True, model_path: str = 'deepseek-ai/DeepSeek-OCR-Small'):
+    def __init__(self, use_llm: bool = True, model_path: str = 'deepseek-ai/DeepSeek-OCR'):
         """Initialize the offer detector"""
         self.use_llm = use_llm
         self.model = None
@@ -37,8 +37,15 @@ class OfferDetector:
                     trust_remote_code=True,
                     torch_dtype=torch.float32
                 )
+                
+                # Force ALL parameters and buffers to float32 (recursively)
+                for param in self.model.parameters():
+                    param.data = param.data.to(torch.float32)
+                for buffer in self.model.buffers():
+                    buffer.data = buffer.data.to(torch.float32)
+                
                 self.model = self.model.eval()
-                logger.info("DeepSeek-OCR loaded successfully for detection")
+                logger.info("DeepSeek-OCR loaded - ALL layers forced to float32")
             except Exception as e:
                 logger.error(f"Failed to load DeepSeek-OCR, falling back to traditional CV: {e}")
                 self.use_llm = False
@@ -91,22 +98,32 @@ class OfferDetector:
                 
                 # Structured prompt for offer detection
                 prompt = f"""<image>
-Analyze this retail flyer ({img_w}x{img_h}px) and find ALL product offers with prices.
+Analyze this retail flyer ({img_w}x{img_h}px) and identify ALL product offers.
 
-For EACH product offer, return:
+For EACH product offer, you must:
+1. Find the product image/photo
+2. Find ALL text associated with that product (title, price, discount, description)
+3. Determine the EXACT bounding box that includes BOTH the product image AND all its text
+4. Only include offers where you are 90% or more confident
+
+Return JSON array:
 [
-  {{"bbox": [x, y, width, height], "description": "product"}},
+  {{"bbox": [x, y, width, height], "confidence": 0.95, "has_text": true, "has_image": true}},
   ...
 ]
 
-IMPORTANT:
-- Find EVERY product with a price - don't miss any!
-- Include small offers and large offers
-- Each product should be its own separate bbox
-- Don't split one product into multiple boxes
-- Ignore only: headers, footers, logos, page numbers
-- Return precise integer coordinates
-- Return ONLY valid JSON array"""
+CRITICAL RULES:
+- bbox must include the COMPLETE offer: product image + all related text (price, title, discount)
+- If text is above/below/beside product, expand bbox to include it
+- confidence must be 0.90 or higher (90%+)
+- has_text: true only if text is clearly visible
+- has_image: true if product photo is present
+- Use precise integer pixel coordinates
+- Find EVERY product offer, don't miss any
+- Each product = separate bbox
+- Skip headers, footers, logos, decorative elements
+
+Respond ONLY with valid JSON array."""
                 
                 # Perform inference with larger size for better detection
                 result = self.model.infer(
@@ -114,8 +131,8 @@ IMPORTANT:
                     prompt=prompt,
                     image_file=tmp_path,
                     output_path=output_dir,
-                    base_size=1536,  # Larger for better detection
-                    image_size=1536,  # Larger for better detection
+                    base_size=640,  # SMALL model config
+                    image_size=640,  # SMALL model config
                     crop_mode=False,
                     save_results=False,
                     test_compress=False
@@ -179,11 +196,20 @@ IMPORTANT:
                         w = max(10, min(int(w), img_w - x))
                         h = max(10, min(int(h), img_h - y))
                         
-                        detections.append({
-                            'bbox': (x, y, w, h),
-                            'confidence': 0.95,  # High confidence for LLM
-                            'description': item.get('description', '')
-                        })
+                        # Get confidence from LLM response, must be >= 90%
+                        confidence = float(item.get('confidence', 0.90))
+                        
+                        # Only include if confidence >= 90%
+                        if confidence >= 0.90:
+                            detections.append({
+                                'bbox': (x, y, w, h),
+                                'confidence': confidence,
+                                'has_text': item.get('has_text', False),
+                                'has_image': item.get('has_image', False),
+                                'description': item.get('description', '')
+                            })
+                        else:
+                            logger.debug(f"Skipping detection with low confidence: {confidence}")
             
             else:
                 # Try alternative parsing - look for coordinate patterns
@@ -306,11 +332,11 @@ IMPORTANT:
             area_ratio = area / img_area
             aspect_ratio = w / h if h > 0 else 0
             
-            # Filter criteria for offer boxes
-            if not (0.02 < area_ratio < 0.25):
+            # Filter criteria for offer boxes - adjusted to catch more offers
+            if not (0.015 < area_ratio < 0.30):  # Wider range
                 continue
             
-            if not (0.4 < aspect_ratio < 2.5):
+            if not (0.3 < aspect_ratio < 3.0):  # Wider range
                 continue
             
             # Check solidity
@@ -325,8 +351,9 @@ IMPORTANT:
             approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
             
             if len(approx) >= 4:
-                # Add some padding
-                padding = 5
+                # Don't add fixed padding - let LLM determine boundaries
+                # Only minimal adjustment for contour precision
+                padding = 5  # Minimal padding for contour edge precision
                 x = max(0, x - padding)
                 y = max(0, y - padding)
                 w = min(img_w - x, w + 2 * padding)
@@ -334,7 +361,7 @@ IMPORTANT:
                 
                 detections.append({
                     'bbox': (x, y, w, h),
-                    'confidence': 0.85
+                    'confidence': 0.90  # 90% minimum confidence
                 })
         
         # Remove overlapping detections

@@ -25,7 +25,7 @@ class OCRProcessor:
     """OCR processor using DeepSeek-OCR"""
     
     def __init__(self, engine: str = 'deepseek', languages: List[str] = ['en', 'ar'], 
-                 model_path: str = 'deepseek-ai/DeepSeek-OCR-Small'):
+                 model_path: str = 'deepseek-ai/DeepSeek-OCR'):
         self.engine_name = engine
         self.languages = languages
         self.model_path = model_path
@@ -40,7 +40,10 @@ class OCRProcessor:
             self._init_deepseek_ocr()
         except Exception as e:
             logger.error(f"Failed to initialize DeepSeek-OCR: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             self.engine_name = 'none'
+            raise  # Re-raise to see the error clearly
     
     def _init_deepseek_ocr(self):
         """Initialize DeepSeek-OCR"""
@@ -60,8 +63,14 @@ class OCRProcessor:
                 torch_dtype=torch.float32
             )
             
+            # Force ALL parameters and buffers to float32 (recursively)
+            for param in self.ocr_engine.parameters():
+                param.data = param.data.to(torch.float32)
+            for buffer in self.ocr_engine.buffers():
+                buffer.data = buffer.data.to(torch.float32)
+            
             self.ocr_engine = self.ocr_engine.eval()
-            logger.info("Model loaded on CPU")
+            logger.info("Model loaded on CPU - ALL layers forced to float32")
             logger.info("DeepSeek-OCR initialized successfully")
             
         except Exception as e:
@@ -70,9 +79,10 @@ class OCRProcessor:
     
     def extract_text(self, image: np.ndarray) -> Dict[str, Any]:
         """Extract text from image with structured prompt"""
-        if self.engine_name == 'deepseek':
+        if self.engine_name == 'deepseek' and self.ocr_engine is not None:
             raw_text = self._extract_deepseek_ocr(image)
         else:
+            logger.warning(f"OCR engine not available (engine_name={self.engine_name}, ocr_engine={self.ocr_engine is not None})")
             raw_text = "OCR not available"
         
         # Try to parse as JSON first (structured response)
@@ -95,7 +105,8 @@ class OCRProcessor:
             'discounted_price': None,
             'discount_percentage': None,
             'promotional_text': None,
-            'full_text': ''
+            'full_text': '',
+            'confidence': 0.0
         }
         
         if not text:
@@ -109,6 +120,13 @@ class OCRProcessor:
                 json_str = json_match.group(0)
                 parsed = json.loads(json_str)
                 
+                # Extract confidence score - must be >= 0.90
+                confidence = float(parsed.get('confidence', 0.0))
+                
+                if confidence < 0.90:
+                    logger.warning(f"OCR confidence {confidence} below 90% threshold - discarding result")
+                    return result
+                
                 # Extract fields from JSON
                 result['product_title'] = parsed.get('product_title')
                 result['original_price'] = parsed.get('original_price')
@@ -116,8 +134,9 @@ class OCRProcessor:
                 result['discount_percentage'] = parsed.get('discount_percentage')
                 result['promotional_text'] = parsed.get('promotional_text')
                 result['full_text'] = parsed.get('all_text', text)
+                result['confidence'] = confidence
                 
-                logger.info("Successfully parsed structured JSON response")
+                logger.info(f"Successfully parsed JSON response with {confidence*100:.1f}% confidence")
                 return result
         
         except json.JSONDecodeError as e:
@@ -130,6 +149,8 @@ class OCRProcessor:
     
     def _extract_deepseek_ocr(self, image: np.ndarray) -> str:
         """Extract text using DeepSeek-OCR with structured prompt"""
+        logger.info("=== USING NEW OCR CODE (v2) ===")  # Debug marker
+        tmp_path = None
         try:
             # Convert to RGB PIL image
             if len(image.shape) == 3:
@@ -139,45 +160,71 @@ class OCRProcessor:
             
             pil_image = Image.fromarray(image_rgb)
             
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                pil_image.save(tmp.name, 'JPEG', quality=95)
-                tmp_path = tmp.name
+            # Save to temporary file with proper handling
+            import tempfile
+            tmp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+            tmp_path = tmp_file.name
+            tmp_file.close()
+            
+            pil_image.save(tmp_path, 'JPEG', quality=95)
+            logger.debug(f"Saved temporary image to: {tmp_path}")
+            
+            # Verify file exists
+            if not os.path.exists(tmp_path):
+                raise FileNotFoundError(f"Temporary image file not created: {tmp_path}")
             
             try:
-                # Structured prompt for retail offer extraction
+                # Structured prompt for retail offer extraction with confidence requirement
                 prompt = """<image>
-Extract ALL text from this retail product offer image.
+Extract ALL text from this retail product offer image with high accuracy.
 
-Provide the following information in JSON format:
+You must provide:
+1. ALL visible text (English and Arabic)
+2. Structured product information
+3. Your confidence level in the extraction
+
+Return JSON format:
 {
   "product_title": "Full product name",
   "original_price": "XX.XX" (if shown),
   "discounted_price": "XX.XX",
   "discount_percentage": "XX%" (if shown),
   "promotional_text": "Any special offers or conditions",
-  "all_text": "Complete text from the image"
+  "all_text": "Complete text from the image including ALL visible text",
+  "confidence": 0.95
 }
 
-IMPORTANT:
-- Extract text in both English and Arabic
-- Preserve price formats exactly (e.g., 21.95, ر.س 21.95)
-- Include ALL visible text in the "all_text" field
-- If a field is not present, use null
+CRITICAL REQUIREMENTS:
+- Extract text in BOTH English and Arabic
+- Preserve price formats exactly (e.g., 21.95, ر.س 21.95, SAR 21.95)
+- Include ALL visible text in "all_text" field - don't miss anything
+- confidence: 0.0-1.0 score (only return results with 0.90+ confidence)
+- Read text carefully, including small text
+- If a field is not visible, use null
+- Be thorough - check all corners of the image
 
 Respond ONLY with valid JSON."""
                 
-                # Perform inference with optimized parameters for cropped offers
+                # Perform inference with Small model config for efficiency
+                logger.debug(f"Calling DeepSeek-OCR.infer with image: {tmp_path}")
+                
+                # Create temp output directory for model
+                import tempfile
+                output_dir = tempfile.mkdtemp(prefix='deepseek_ocr_output_')
+                
                 result = self.ocr_engine.infer(
                     self.tokenizer,
                     prompt=prompt,
                     image_file=tmp_path,
-                    base_size=512,  # Smaller for cropped offers
-                    image_size=384,  # Adjusted for offer images
+                    output_path=output_dir,  # Must provide valid output path
+                    base_size=640,  # SMALL model config
+                    image_size=640,  # SMALL model config
                     crop_mode=False,
                     save_results=False,
                     test_compress=False
                 )
+                
+                logger.debug(f"DeepSeek-OCR result type: {type(result)}")
                 
                 # Extract text - DeepSeek returns different formats
                 if isinstance(result, dict):
@@ -201,21 +248,40 @@ Respond ONLY with valid JSON."""
                 
                 logger.info(f"Extracted {len(text)} characters of text")
                 logger.debug(f"Raw OCR result: {text[:300]}...")
+                
+                # Clean up temp output directory
+                try:
+                    import shutil
+                    if 'output_dir' in locals() and os.path.exists(output_dir):
+                        shutil.rmtree(output_dir, ignore_errors=True)
+                except:
+                    pass
+                
                 return text
                 
             except Exception as inner_e:
                 logger.error(f"DeepSeek-OCR inference failed: {inner_e}", exc_info=True)
-                return f"OCR inference error: {str(inner_e)}"  # Return error for debugging
-                
-            finally:
+                # Clean up output dir on error
                 try:
-                    os.unlink(tmp_path)
+                    import shutil
+                    if 'output_dir' in locals() and os.path.exists(output_dir):
+                        shutil.rmtree(output_dir, ignore_errors=True)
                 except:
                     pass
-            
+                return f"OCR inference error: {str(inner_e)}"
+                
         except Exception as e:
             logger.error(f"DeepSeek-OCR extraction failed: {e}", exc_info=True)
-            return f"OCR error: {str(e)}"  # Return error instead of empty string
+            return f"OCR error: {str(e)}"
+            
+        finally:
+            # Clean up temporary file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                    logger.debug(f"Cleaned up temporary file: {tmp_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp file {tmp_path}: {e}")
     
     def _parse_offer_text(self, text: str) -> Dict[str, Optional[str]]:
         """Parse extracted text with better pattern matching"""

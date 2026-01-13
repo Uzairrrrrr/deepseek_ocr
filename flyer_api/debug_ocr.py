@@ -21,8 +21,8 @@ print("="*70)
 # Load model
 print("\n1. Loading DeepSeek-OCR model...")
 try:
-    tokenizer = AutoTokenizer.from_pretrained('deepseek-ai/DeepSeek-OCR-Small', trust_remote_code=True)
-    model = AutoModel.from_pretrained('deepseek-ai/DeepSeek-OCR-Small', trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained('deepseek-ai/DeepSeek-OCR', trust_remote_code=True)
+    model = AutoModel.from_pretrained('deepseek-ai/DeepSeek-OCR', trust_remote_code=True)
     model = model.eval()
     print("✓ Model loaded successfully")
 except Exception as e:
