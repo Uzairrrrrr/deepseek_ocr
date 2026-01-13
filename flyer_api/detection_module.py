@@ -91,32 +91,31 @@ class OfferDetector:
                 
                 # Structured prompt for offer detection
                 prompt = f"""<image>
-Analyze this retail flyer image ({img_w}x{img_h} pixels) and identify all individual offer/product sections.
+Analyze this retail flyer ({img_w}x{img_h}px) and find ALL product offers with prices.
 
-For each offer section, provide:
-1. Bounding box coordinates as [x, y, width, height] in pixels
-2. A brief description
+For EACH product offer, return:
+[
+  {{"bbox": [x, y, width, height], "description": "product"}},
+  ...
+]
 
 IMPORTANT:
-- Ignore logos, headers, footers, and decorative elements
-- Only detect actual product offers with prices
-- Each offer should be a distinct product or promotion
-- Provide coordinates as precise integers
-
-Respond ONLY with a JSON array:
-[
-  {{"bbox": [x, y, width, height], "description": "product name"}},
-  ...
-]"""
+- Find EVERY product with a price - don't miss any!
+- Include small offers and large offers
+- Each product should be its own separate bbox
+- Don't split one product into multiple boxes
+- Ignore only: headers, footers, logos, page numbers
+- Return precise integer coordinates
+- Return ONLY valid JSON array"""
                 
-                # Perform inference
+                # Perform inference with larger size for better detection
                 result = self.model.infer(
                     self.tokenizer,
                     prompt=prompt,
                     image_file=tmp_path,
                     output_path=output_dir,
-                    base_size=1024,
-                    image_size=1024,
+                    base_size=1536,  # Larger for better detection
+                    image_size=1536,  # Larger for better detection
                     crop_mode=False,
                     save_results=False,
                     test_compress=False
@@ -204,11 +203,61 @@ Respond ONLY with a JSON array:
                             'bbox': (x, y, w, h),
                             'confidence': 0.90
                         })
+            
+            # Apply Non-Maximum Suppression to remove duplicates
+            detections = self._apply_nms(detections, iou_threshold=0.5)
         
         except Exception as e:
             logger.error(f"Failed to parse LLM detections: {e}")
         
         return detections
+    
+    
+    def _apply_nms(self, detections: List[Dict], iou_threshold: float = 0.5) -> List[Dict]:
+        """Apply Non-Maximum Suppression to remove overlapping boxes"""
+        if not detections:
+            return detections
+        
+        # Convert to numpy arrays
+        boxes = np.array([d['bbox'] for d in detections])
+        scores = np.array([d['confidence'] for d in detections])
+        
+        # Convert from (x, y, w, h) to (x1, y1, x2, y2)
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 0] + boxes[:, 2]
+        y2 = boxes[:, 1] + boxes[:, 3]
+        
+        areas = boxes[:, 2] * boxes[:, 3]
+        order = scores.argsort()[::-1]
+        
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+            
+            if order.size == 1:
+                break
+            
+            # Calculate IoU
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            
+            intersection = w * h
+            union = areas[i] + areas[order[1:]] - intersection
+            iou = intersection / union
+            
+            # Keep boxes with IoU less than threshold
+            inds = np.where(iou <= iou_threshold)[0]
+            order = order[inds + 1]
+        
+        logger.info(f"NMS: {len(detections)} -> {len(keep)} detections")
+        return [detections[i] for i in keep]
     
     
     def _detect_traditional(self, image: np.ndarray) -> List[Dict]:

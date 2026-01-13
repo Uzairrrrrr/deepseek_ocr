@@ -203,6 +203,10 @@ Respond ONLY with valid JSON."""
                 logger.debug(f"Raw OCR result: {text[:300]}...")
                 return text
                 
+            except Exception as inner_e:
+                logger.error(f"DeepSeek-OCR inference failed: {inner_e}", exc_info=True)
+                return f"OCR inference error: {str(inner_e)}"  # Return error for debugging
+                
             finally:
                 try:
                     os.unlink(tmp_path)
@@ -211,7 +215,7 @@ Respond ONLY with valid JSON."""
             
         except Exception as e:
             logger.error(f"DeepSeek-OCR extraction failed: {e}", exc_info=True)
-            return ""
+            return f"OCR error: {str(e)}"  # Return error instead of empty string
     
     def _parse_offer_text(self, text: str) -> Dict[str, Optional[str]]:
         """Parse extracted text with better pattern matching"""
