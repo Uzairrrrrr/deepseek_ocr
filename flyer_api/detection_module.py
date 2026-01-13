@@ -22,7 +22,7 @@ class OfferDetector:
     Detects offer containers in flyer images using DeepSeek-OCR VLM
     """
     
-    def __init__(self, use_llm: bool = True, model_path: str = 'deepseek-ai/DeepSeek-OCR'):
+    def __init__(self, use_llm: bool = True, model_path: str = 'deepseek-ai/DeepSeek-OCR-Small'):
         """Initialize the offer detector"""
         self.use_llm = use_llm
         self.model = None

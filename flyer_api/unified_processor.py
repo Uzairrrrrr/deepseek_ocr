@@ -24,7 +24,7 @@ class UnifiedFlyerProcessor:
     Optimized for systems with limited GPU memory
     """
     
-    def __init__(self, model_path: str = 'deepseek-ai/DeepSeek-OCR'):
+    def __init__(self, model_path: str = 'deepseek-ai/DeepSeek-OCR-Small'):
         """
         Initialize unified processor in CPU-only mode
         """

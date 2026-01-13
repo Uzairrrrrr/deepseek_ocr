@@ -25,7 +25,7 @@ class OCRProcessor:
     """OCR processor using DeepSeek-OCR"""
     
     def __init__(self, engine: str = 'deepseek', languages: List[str] = ['en', 'ar'], 
-                 model_path: str = 'deepseek-ai/DeepSeek-OCR'):
+                 model_path: str = 'deepseek-ai/DeepSeek-OCR-Small'):
         self.engine_name = engine
         self.languages = languages
         self.model_path = model_path
