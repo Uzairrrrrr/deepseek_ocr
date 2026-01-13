@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup files
+*.backup
+*.bak
+*.bak2
+*.tmp
+*.orig
+
+# Output directories
+outputs/
+flyer_api/outputs/
+flyer_api/test_images/*.jpg
+flyer_api/test_images/*.png
+flyer_api/test_images/*.pdf
+!flyer_api/test_images/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Environment variables
+.env
+.env.local
+
+# Model files (if large)
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Data files
+*.csv
+*.json
+!requirements.txt
+!package.json
+
+# OS
+Thumbs.db
+.DS_Store
